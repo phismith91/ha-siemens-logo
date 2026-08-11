@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Siemens LOGO verbinden",
+        "description": "Verbindung zur LOGO ueber Modbus TCP konfigurieren.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "unit_id": "Unit-ID"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Siemens LOGO Optionen",
+        "description": "Polling-Intervall und Points-JSON bearbeiten.",
+        "data": {
+          "scan_interval": "Scan-Intervall (Sekunden)",
+          "points": "Points JSON"
+        }
+      }
+    },
+    "error": {
+      "invalid_json": "Ungueltiges JSON"
+    }
+  }
+}

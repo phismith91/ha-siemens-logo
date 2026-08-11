@@ -1,0 +1,11 @@
+{
+  "domain": "siemens_logo",
+  "name": "Siemens LOGO",
+  "codeowners": ["@phschm7"],
+  "config_flow": true,
+  "documentation": "https://github.com/your-org/ha-siemens-logo",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "requirements": ["pymodbus==3.8.3"],
+  "version": "0.1.0"
+}

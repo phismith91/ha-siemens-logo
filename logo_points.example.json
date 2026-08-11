@@ -1,0 +1,28 @@
+[
+  {
+    "key": "q1",
+    "name": "LOGO Q1",
+    "platform": "switch",
+    "kind": "coil",
+    "address": 8192
+  },
+  {
+    "key": "i1",
+    "name": "LOGO I1",
+    "platform": "binary_sensor",
+    "kind": "discrete",
+    "address": 1,
+    "device_class": "power"
+  },
+  {
+    "key": "ai1",
+    "name": "LOGO AI1",
+    "platform": "sensor",
+    "kind": "holding",
+    "address": 0,
+    "scale": 0.1,
+    "precision": 1,
+    "unit_of_measurement": "V",
+    "device_class": "voltage"
+  }
+]
