@@ -5,8 +5,8 @@
         "title": "Siemens LOGO verbinden",
         "description": "Verbindung zur LOGO ueber Modbus TCP konfigurieren.",
         "data": {
-          "host": "Host",
-          "port": "Port",
+          "host": "Host / IP-Adresse",
+          "port": "Modbus-Port",
           "unit_id": "Unit-ID"
         }
       }
@@ -16,15 +16,43 @@
     "step": {
       "init": {
         "title": "Siemens LOGO Optionen",
-        "description": "Polling-Intervall und Points-JSON bearbeiten.",
+        "description": "Polling-Intervall und Quelle der I/O-Konfiguration waehlen.",
         "data": {
           "scan_interval": "Scan-Intervall (Sekunden)",
+          "points_source": "Konfigurationsquelle"
+        },
+        "data_description": {
+          "points_source": "**Manuell**: JSON direkt eingeben | **Datei**: JSON-Datei aus HA-Config-Verzeichnis laden | **LOGO! 8 Standard**: Alle I/Os (I1-I8, Q1-Q8, AI1-AI8, AQ1-AQ2, M1-M8) vorkonfigurieren"
+        }
+      },
+      "manual": {
+        "title": "Points JSON manuell eingeben",
+        "description": "Geben Sie die Punkte-Konfiguration als JSON-Liste ein.",
+        "data": {
           "points": "Points JSON"
+        }
+      },
+      "file": {
+        "title": "Konfiguration aus Datei laden",
+        "description": "Pfad zur JSON-Datei relativ zum HA-Konfigurationsverzeichnis angeben.\n\nBeispiel: `custom_components/siemens_logo/my_points.json`\n\nDie Datei muss eine JSON-Liste mit Point-Objekten enthalten.",
+        "data": {
+          "file_path": "Dateipfad (relativ zu /config/)"
         }
       }
     },
     "error": {
-      "invalid_json": "Ungueltiges JSON"
+      "invalid_json": "Ungueltiges JSON oder keine Liste",
+      "file_not_found": "Datei nicht gefunden"
+    }
+  },
+  "selector": {
+    "points_source": {
+      "options": {
+        "manual": "Manuell (JSON eingeben)",
+        "file": "Aus Datei laden",
+        "logo8_default": "LOGO! 8 Standard-Layout"
+      }
     }
   }
 }
+

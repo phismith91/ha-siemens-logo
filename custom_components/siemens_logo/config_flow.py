@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import json
+from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
@@ -11,14 +13,19 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
 )
 
 from .const import (
+    CONF_FILE_PATH,
     CONF_HOST,
     CONF_POINTS,
+    CONF_POINTS_SOURCE,
     CONF_PORT,
     CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
@@ -26,6 +33,10 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_UNIT_ID,
     DOMAIN,
+    LOGO8_DEFAULT_POINTS,
+    POINTS_SOURCE_FILE,
+    POINTS_SOURCE_LOGO8_DEFAULT,
+    POINTS_SOURCE_MANUAL,
 )
 
 DEFAULT_POINTS = [
@@ -93,14 +104,47 @@ class SiemensLogoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class SiemensLogoOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self.config_entry = config_entry
+        self._scan_interval: int = config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Quelle für die Punkte-Konfiguration wählen."""
+        if user_input is not None:
+            self._scan_interval = int(user_input[CONF_SCAN_INTERVAL])
+            source = user_input[CONF_POINTS_SOURCE]
+            if source == POINTS_SOURCE_MANUAL:
+                return await self.async_step_manual()
+            if source == POINTS_SOURCE_FILE:
+                return await self.async_step_file()
+            # logo8_default: sofort speichern
+            return self.async_create_entry(
+                title="",
+                data={CONF_SCAN_INTERVAL: self._scan_interval, CONF_POINTS: LOGO8_DEFAULT_POINTS},
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SCAN_INTERVAL,
+                    default=self._scan_interval,
+                ): NumberSelector(NumberSelectorConfig(min=1, max=3600, mode=NumberSelectorMode.BOX)),
+                vol.Required(CONF_POINTS_SOURCE, default=POINTS_SOURCE_MANUAL): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[POINTS_SOURCE_MANUAL, POINTS_SOURCE_FILE, POINTS_SOURCE_LOGO8_DEFAULT],
+                        mode=SelectSelectorMode.LIST,
+                        translation_key=CONF_POINTS_SOURCE,
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
+    async def async_step_manual(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Points direkt als JSON eingeben."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            points_raw = user_input[CONF_POINTS]
             try:
-                points = json.loads(points_raw)
+                points = json.loads(user_input[CONF_POINTS])
                 if not isinstance(points, list):
                     raise ValueError("points must be a list")
             except (json.JSONDecodeError, ValueError):
@@ -108,27 +152,52 @@ class SiemensLogoOptionsFlow(config_entries.OptionsFlow):
             else:
                 return self.async_create_entry(
                     title="",
-                    data={
-                        CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
-                        CONF_POINTS: points,
-                    },
+                    data={CONF_SCAN_INTERVAL: self._scan_interval, CONF_POINTS: points},
                 )
 
-        points = self.config_entry.options.get(CONF_POINTS, DEFAULT_POINTS)
-        points_json = json.dumps(points, ensure_ascii=True, indent=2)
-
+        current_points = self.config_entry.options.get(CONF_POINTS, [])
         schema = vol.Schema(
             {
                 vol.Required(
-                    CONF_SCAN_INTERVAL,
-                    default=self.config_entry.options.get(
-                        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
-                    ),
-                ): NumberSelector(NumberSelectorConfig(min=1, max=3600, mode=NumberSelectorMode.BOX)),
-                vol.Required(CONF_POINTS, default=points_json): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+                    CONF_POINTS,
+                    default=json.dumps(current_points, ensure_ascii=True, indent=2),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
+            }
+        )
+        return self.async_show_form(step_id="manual", data_schema=schema, errors=errors)
+
+    async def async_step_file(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Points aus einer JSON-Datei im HA-Konfigurationsverzeichnis laden.
+
+        Beispiel: custom_components/siemens_logo/my_points.json
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            raw_path = user_input[CONF_FILE_PATH].strip()
+            full_path = Path(self.hass.config.path(raw_path))
+            try:
+                content = await self.hass.async_add_executor_job(
+                    functools.partial(full_path.read_text, encoding="utf-8")
+                )
+                points = json.loads(content)
+                if not isinstance(points, list):
+                    raise ValueError("points must be a list")
+            except FileNotFoundError:
+                errors[CONF_FILE_PATH] = "file_not_found"
+            except (json.JSONDecodeError, ValueError):
+                errors[CONF_FILE_PATH] = "invalid_json"
+            else:
+                return self.async_create_entry(
+                    title="",
+                    data={CONF_SCAN_INTERVAL: self._scan_interval, CONF_POINTS: points},
+                )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_FILE_PATH): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
                 ),
             }
         )
-
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="file", data_schema=schema, errors=errors)
