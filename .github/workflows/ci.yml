@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["master", "feat/**", "fix/**", "chore/**"]
   pull_request:
+    branches: ["master"]
 
 jobs:
   lint:
@@ -58,6 +59,22 @@ jobs:
           path: |
             coverage.xml
             htmlcov/
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs-validate:
+    name: HACS Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
 
   coverage-gate:
     runs-on: ubuntu-latest
