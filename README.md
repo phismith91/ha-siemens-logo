@@ -1,49 +1,179 @@
-# Siemens LOGO Custom Integration (MVP)
+# Siemens LOGO! – Home Assistant Integration
 
-Dieses Verzeichnis enthaelt ein Home-Assistant-Custom-Component fuer Siemens LOGO ueber Modbus TCP.
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/OWNER/REPO?label=stable)](https://github.com/OWNER/REPO/releases/latest)
+[![Pre-release](https://img.shields.io/github/v/release/OWNER/REPO?include_prereleases&label=pre-release)](https://github.com/OWNER/REPO/releases)
+[![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-%3E%3D2025.1-blue)](https://www.home-assistant.io)
+[![License](https://img.shields.io/github/license/OWNER/REPO)](LICENSE)
+
+> **Hinweis:** `OWNER/REPO` muss nach dem ersten GitHub-Push auf den echten Repository-Pfad ersetzt werden.
+
+Home Assistant Custom Integration für die **Siemens LOGO! 8 (0BA8)** SPS über Modbus TCP.
+
+---
 
 ## Enthaltene Features
 
-- Config Flow in der HA UI (Host, Port, Unit-ID)
-- Optionen in der HA UI:
-  - Scan-Intervall
-  - Point-Mapping als JSON
-- Entitaeten:
-  - switch (coil)
-  - binary_sensor (coil/discrete)
-  - sensor (holding/input)
+| Feature | Beschreibung |
+|---|---|
+| Config Flow | Verbindung über HA UI (Host, Port, Unit-ID) |
+| LOGO! 8 Standard-Layout | Ein Klick – alle I/Os sofort in HA (I1-I8, Q1-Q8, AI1-AI8, AQ1-AQ2, M1-M8) |
+| Datei-Import | Points-JSON aus HA-Config-Verzeichnis laden |
+| Manuelles JSON | Eigene Konfiguration direkt eintippen |
+| Entitäten | `switch` (coil), `binary_sensor` (coil/discrete), `sensor` (holding/input) |
+| Scan-Intervall | Konfigurierbar über Integrationsoptionen |
+
+---
 
 ## Installation
 
-1. Kopiere den Ordner `custom_components/siemens_logo` in deine Home-Assistant-Config.
-2. Starte Home Assistant neu.
-3. Gehe zu Einstellungen -> Geraete & Dienste -> Integration hinzufuegen.
-4. Suche nach "Siemens LOGO".
-5. Trage Host/Port/Unit-ID ein.
-6. In den Integrationsoptionen Points-JSON aus `logo_points.example.json` eintragen und auf deine LOGO-Register anpassen.
+### Via HACS (empfohlen)
 
-## Point-JSON Schema
+1. HACS → Integrationen → ⋮ → Benutzerdefinierte Repositories
+2. URL: `https://github.com/OWNER/REPO` | Kategorie: `Integration`
+3. Siemens LOGO suchen und installieren
+4. Home Assistant neu starten
 
-Jeder Eintrag braucht mindestens:
+### Manuell
 
-- key: eindeutiger Schluessel
-- name: Anzeigename
-- platform: sensor | switch | binary_sensor
-- kind: coil | discrete | holding | input
-- address: Register- oder Coil-Adresse
+```bash
+cp -r custom_components/siemens_logo <ha-config>/custom_components/siemens_logo
+```
 
-Optional fuer sensor:
+Danach HA neu starten.
 
-- scale (Standard 1.0)
-- precision (z. B. 1)
-- unit_of_measurement (z. B. "V")
-- device_class (z. B. "voltage")
+---
 
-## Wichtige Hinweise
+## Einrichtung
 
-- Das ist ein MVP als Startpunkt, keine fertige Produktintegration.
-- Fuer produktiven Betrieb sollten noch dazu:
-  - bessere Adressvalidierung
-  - Bulk-Reads statt Einzelabfragen
-  - Device-Info/Diagnostics
-  - Tests (pytest + HA test harness)
+1. **Einstellungen → Geräte & Dienste → Integration hinzufügen → "Siemens LOGO"**
+2. Host/IP, Port (Standard: `502`), Unit-ID (Standard: `1`) eintragen
+
+### Optionen (nach der Einrichtung)
+
+In den Integrationsoptionen Konfigurationsquelle wählen:
+
+| Quelle | Beschreibung |
+|---|---|
+| **LOGO! 8 Standard-Layout** | Alle 32 Standard-I/Os sofort aktiv – empfohlen für den Start |
+| **Aus Datei laden** | JSON-Datei im HA-Config-Verzeichnis angeben (z. B. `siemens_logo_points.json`) |
+| **Manuell** | Points-JSON direkt im Textfeld eingeben |
+
+---
+
+## Datei-Import (Kundenworkflow)
+
+1. JSON-Datei (z. B. `meine_logo.json`) über den HA File Editor nach `/config/` hochladen
+2. Integrationsoptionen öffnen → **„Aus Datei laden"**
+3. Dateipfad angeben: `meine_logo.json`
+4. Speichern → Entities werden automatisch angelegt
+
+**Beispiel-Datei** (`logo_points.example.json` im Repo):
+
+```json
+[
+  { "key": "q1", "name": "Pumpe 1", "platform": "switch", "kind": "coil", "address": 8192 },
+  { "key": "i1", "name": "Druckschalter", "platform": "binary_sensor", "kind": "discrete", "address": 1 },
+  { "key": "ai1", "name": "Temperatur", "platform": "sensor", "kind": "holding", "address": 0,
+    "scale": 0.1, "precision": 1, "unit_of_measurement": "°C", "device_class": "temperature" }
+]
+```
+
+### Point-JSON Schema
+
+| Feld | Pflicht | Beschreibung |
+|---|---|---|
+| `key` | ✓ | Eindeutiger Schlüssel |
+| `name` | ✓ | Anzeigename in HA |
+| `platform` | ✓ | `sensor` \| `switch` \| `binary_sensor` |
+| `kind` | ✓ | `coil` \| `discrete` \| `holding` \| `input` |
+| `address` | ✓ | Modbus-Register-Adresse |
+| `scale` | – | Skalierungsfaktor (Standard: `1.0`) |
+| `precision` | – | Nachkommastellen |
+| `unit_of_measurement` | – | z. B. `"°C"`, `"V"`, `"bar"` |
+| `device_class` | – | z. B. `"temperature"`, `"voltage"` |
+
+---
+
+## LOGO! 8 Modbus-Adresstabelle (Standard 0BA8)
+
+| Typ | LOGO! Bezeichnung | Modbus-Art | Adressbereich |
+|---|---|---|---|
+| Digitale Eingänge | I1–I8 | Discrete Input | 1–8 |
+| Digitale Ausgänge | Q1–Q8 | Coil | 8192–8199 |
+| Analoge Eingänge | AI1–AI8 | Holding Register | 0–7 |
+| Analoge Ausgänge | AQ1–AQ2 | Holding Register | 528–529 |
+| Merker | M1–M8 | Coil | 8256–8263 |
+
+---
+
+## Entwicklung
+
+Siehe [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) für den vollständigen Entwicklungsplan.
+
+```bash
+# Virtuelle Umgebung anlegen (Python 3.12)
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+source .venv/bin/activate        # Linux/macOS
+
+# Dev-Abhängigkeiten installieren
+pip install -r requirements-dev.txt
+pip install -e . --no-deps
+
+# Tests lokal
+pytest tests/test_tdd_policy.py tests/test_manifest.py -v --no-cov
+
+# Alle Tests (GitHub Actions / Linux)
+pytest
+```
+
+---
+
+## Release-Prozess
+
+### Stabiles Release (`v1.2.3`)
+
+```bash
+# 1. manifest.json version auf "1.2.3" setzen
+# 2. CHANGELOG.md aktualisieren
+# 3. Commit + Tag
+git add custom_components/siemens_logo/manifest.json CHANGELOG.md
+git commit -m "chore(release): v1.2.3"
+git tag v1.2.3
+git push origin master --tags
+# → release.yml läuft, GitHub Release wird erstellt (kein Pre-Release-Flag)
+```
+
+### Pre-Release (`v1.2.3-beta.1`)
+
+```bash
+# 1. manifest.json version auf "1.2.3-beta.1" setzen
+# 2. CHANGELOG.md aktualisieren
+git add custom_components/siemens_logo/manifest.json CHANGELOG.md
+git commit -m "chore(release): v1.2.3-beta.1"
+git tag v1.2.3-beta.1
+git push origin master --tags
+# → release.yml läuft, GitHub Release wird als Pre-Release markiert
+```
+
+Erlaubte Tag-Formate: `v1.2.3`, `v1.2.3-alpha.1`, `v1.2.3-beta.1`, `v1.2.3-rc.1`
+
+### Badges aktualisieren
+
+Nach dem ersten Push die drei `OWNER/REPO`-Platzhalter in dieser Datei durch den echten GitHub-Pfad ersetzen:
+
+```bash
+# Beispiel: phschm7/ha-siemens-logo
+sed -i 's|OWNER/REPO|phschm7/ha-siemens-logo|g' README.md
+git add README.md
+git commit -m "chore: set real repo URL in badges"
+```
+
+---
+
+## Lizenz
+
+MIT – siehe [LICENSE](LICENSE)
+

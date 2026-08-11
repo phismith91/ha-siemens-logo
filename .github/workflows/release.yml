@@ -1,9 +1,17 @@
 name: Release
 
+# Stables:     v1.2.3           → GitHub Release (kein pre-release)
+# Pre-releases: v1.2.3-beta.1   → GitHub Release (prerelease: true)
+#               v1.2.3-rc.1
+#               v1.2.3-alpha.1
+
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
 
 jobs:
   verify:
@@ -39,35 +47,53 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          TAG="${{ github.ref_name }}"
+          if echo "$TAG" | grep -qE -- "-(alpha|beta|rc)\.[0-9]+$"; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG is a PRE-RELEASE"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG is a STABLE release"
+          fi
+
       - name: Validate version consistency
         run: |
           python - << 'PY'
-          import json
-          import re
+          import json, re, sys
           from pathlib import Path
 
           tag = "${{ github.ref_name }}"
-          if not re.match(r"^v\d+\.\d+\.\d+$", tag):
+          # accept v1.2.3 and v1.2.3-beta.1 / -rc.1 / -alpha.1
+          if not re.match(r"^v\d+\.\d+\.\d+(-(alpha|beta|rc)\.\d+)?$", tag):
               raise SystemExit(f"Invalid tag format: {tag}")
-          tag_version = tag[1:]
+          tag_version = tag.lstrip("v")
 
-          manifest = json.loads(Path("custom_components/siemens_logo/manifest.json").read_text(encoding="utf-8"))
-          manifest_version = manifest.get("version")
+          manifest = json.loads(
+              Path("custom_components/siemens_logo/manifest.json").read_text(encoding="utf-8")
+          )
+          manifest_version = manifest.get("version", "")
           if manifest_version != tag_version:
               raise SystemExit(
-                  f"Version mismatch: manifest={manifest_version}, tag={tag_version}"
+                  f"Version mismatch: manifest.json={manifest_version!r}, tag={tag_version!r}\n"
+                  "Update manifest.json before tagging."
               )
-
-          print("Version consistency check passed")
+          print(f"Version consistency OK: {tag_version}")
           PY
-      - name: Create zip artifact
+
+      - name: Build zip artifact
         run: |
-          mkdir dist
+          mkdir -p dist
           cd custom_components
           zip -r ../dist/siemens_logo.zip siemens_logo
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/siemens_logo.zip
           generate_release_notes: true
+          prerelease: ${{ steps.release_type.outputs.is_prerelease }}
 
