@@ -17,6 +17,8 @@
 
 ## Domain Notes
 - Home Assistant Custom Component für Siemens LOGO via Modbus TCP
+- LOGO! 8 spricht S7 (ISO-TCP Port 102, Rack=0, Slot=1) UND Modbus TCP (Port 502) – wir nutzen Modbus TCP, korrekt und einfacher für HA-Nutzer
+- Snap7/libnodave wäre S7-Alternative, bringt für MVP keinen Mehrwert
 - Stack: Python 3.12, pymodbus 3.8.3, ruff/black/mypy, pytest-cov
 - Coverage-Gate: 80 % global (pyproject.toml), Ziel laut Plan: 90 % global / 95 % kritische Module
 - HACS-Onboarding geplant (hacs.json vorhanden, hacs/action in Pipeline vorgesehen)

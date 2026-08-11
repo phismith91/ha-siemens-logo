@@ -1,22 +1,13 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg-info/
 .venv/
-
-# Test / Coverage
-.coverage
-coverage.xml
-htmlcov/
+__pycache__/
+*.pyc
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# OS / Editor
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
+htmlcov/
+coverage.xml
+.coverage
+dist/
+build/
+*.egg-info/
+.claude/

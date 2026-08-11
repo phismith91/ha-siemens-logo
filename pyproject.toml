@@ -23,6 +23,7 @@ ignore = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 addopts = "-q --cov=custom_components/siemens_logo --cov-report=term-missing --cov-report=xml --cov-report=html"
 
 [tool.coverage.run]
