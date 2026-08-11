@@ -14,8 +14,10 @@
 
 ## Shell & Command Reliability
 
-1. **[2026-08-11] Repo bootstrap on this VPS**
-   Do instead: local dir `/home/philipp/projects/logo`, GitHub repo `phismith91/ha-siemens-logo`, `gh` already authenticated as phismith91, SSH git protocol.
+1. **[2026-08-11] SSH agent died mid-session -> git push over SSH fails with "Permission denied (publickey)"**
+   Do instead: check `ls -la /run/user/1000/vscode-ssh-auth-sock-*` — if the symlink target socket is missing, the VSCode host connection dropped (same root cause as Write/Read tool PreToolUse hook timeouts). Fix: `gh auth setup-git && git remote set-url origin https://github.com/phismith91/ha-siemens-logo.git` — pushes over HTTPS using gh's stored token, no SSH agent needed. Repo currently on this HTTPS remote as of 2026-08-11; switch back to SSH only if the agent proves stable again.
+2. **[2026-08-11] Repo bootstrap on this VPS**
+   Do instead: local dir `/home/philipp/projects/logo`, GitHub repo `phismith91/ha-siemens-logo`, `gh` already authenticated as phismith91.
 
 ## Domain Behavior Guardrails
 
