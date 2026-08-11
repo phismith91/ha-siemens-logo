@@ -33,18 +33,20 @@ pipeline.
 
 ## Addressing
 
-LOGO! 8 mirrors physical I/Q/M (and AI/AQ/AM) into a fixed VM memory band
-per the Siemens 0BA8 hardware manual. The integration accepts either form
-in its CSV import:
+**Corrected 2026-08-11 after research (see napkin.md):** LOGO! 8 does
+*not* expose local I/Q/M as Modbus coils by any fixed, universal address.
+Only signals the user has explicitly routed to VM memory in their own
+LOGO!Soft Comfort program (via "Network Input"/"Network Output" blocks,
+which have a *user-assigned* VM address per instance) are visible over
+Modbus. There is no static lookup table to build — any such table would
+be a guess presented as fact, and would silently write to the wrong bit
+on write operations.
 
-- Raw VM address: `V923.0` (byte.bit for coils, `V300` word-style for
-  future analog support)
-- Symbolic form: `I1`, `Q3`, `M12` — translated internally via a static
-  lookup table to the underlying VM offset.
-
-**Open verification item:** the exact symbolic→VM offset table must be
-confirmed against the Siemens 0BA8 manual during implementation before
-being hardcoded. Do not ship guessed offsets — see `.claude/napkin.md`.
+The CSV `address` column therefore takes the **raw VM address** the user
+configured in their own program: byte.bit form for coils (`V923.0`),
+word form for future analog support (`V300`). No symbolic `I1`/`Q3`/`M12`
+translation. The integration's README documents how to find this address
+in LOGO!Soft Comfort (Network Input/Output block properties).
 
 ## Setup flow
 
