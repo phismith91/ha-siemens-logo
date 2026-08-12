@@ -28,5 +28,5 @@ Versionsnummern folgen [Semantic Versioning](https://semver.org/lang/de/).
 ---
 
 <!-- Verlinkungen -->
-[Unreleased]: https://github.com/OWNER/REPO/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/REPO/releases/tag/v0.1.0
+[Unreleased]: https://github.com/phismith91/ha-siemens-logo/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/phismith91/ha-siemens-logo/releases/tag/v0.1.0

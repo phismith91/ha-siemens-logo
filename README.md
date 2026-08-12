@@ -1,13 +1,11 @@
 # Siemens LOGO! – Home Assistant Integration
 
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/OWNER/REPO?label=stable)](https://github.com/OWNER/REPO/releases/latest)
-[![Pre-release](https://img.shields.io/github/v/release/OWNER/REPO?include_prereleases&label=pre-release)](https://github.com/OWNER/REPO/releases)
+[![CI](https://github.com/phismith91/ha-siemens-logo/actions/workflows/ci.yml/badge.svg)](https://github.com/phismith91/ha-siemens-logo/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/phismith91/ha-siemens-logo?label=stable)](https://github.com/phismith91/ha-siemens-logo/releases/latest)
+[![Pre-release](https://img.shields.io/github/v/release/phismith91/ha-siemens-logo?include_prereleases&label=pre-release)](https://github.com/phismith91/ha-siemens-logo/releases)
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-%3E%3D2025.1-blue)](https://www.home-assistant.io)
-[![License](https://img.shields.io/github/license/OWNER/REPO)](LICENSE)
-
-> **Hinweis:** `OWNER/REPO` muss nach dem ersten GitHub-Push auf den echten Repository-Pfad ersetzt werden.
+[![License](https://img.shields.io/github/license/phismith91/ha-siemens-logo)](LICENSE)
 
 Home Assistant Custom Integration für die **Siemens LOGO! 8 (0BA8)** SPS über Modbus TCP.
 
@@ -31,7 +29,7 @@ Home Assistant Custom Integration für die **Siemens LOGO! 8 (0BA8)** SPS über 
 ### Via HACS (empfohlen)
 
 1. HACS → Integrationen → ⋮ → Benutzerdefinierte Repositories
-2. URL: `https://github.com/OWNER/REPO` | Kategorie: `Integration`
+2. URL: `https://github.com/phismith91/ha-siemens-logo` | Kategorie: `Integration`
 3. Siemens LOGO suchen und installieren
 4. Home Assistant neu starten
 
@@ -165,10 +163,10 @@ Erlaubte Tag-Formate: `v1.2.3`, `v1.2.3-alpha.1`, `v1.2.3-beta.1`, `v1.2.3-rc.1`
 Nach dem ersten Push die drei `OWNER/REPO`-Platzhalter in dieser Datei durch den echten GitHub-Pfad ersetzen:
 
 ```bash
-# Beispiel: phschm7/ha-siemens-logo
-sed -i 's|OWNER/REPO|phschm7/ha-siemens-logo|g' README.md
-git add README.md
-git commit -m "chore: set real repo URL in badges"
+# Repo-URL ist bereits gesetzt: phismith91/ha-siemens-logo
+# Falls der Repo-Name abweicht:
+sed -i 's|phismith91/ha-siemens-logo|DEIN_USER/DEIN_REPO|g' README.md CHANGELOG.md
+git add README.md CHANGELOG.md && git commit -m "chore: fix repo URL"
 ```
 
 ---
