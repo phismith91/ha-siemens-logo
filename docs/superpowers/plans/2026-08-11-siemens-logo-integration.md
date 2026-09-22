@@ -133,7 +133,7 @@ ENTITY_TYPES = ["binary_sensor", "switch"]
   "integration_type": "hub",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/phismith91/ha-siemens-logo/issues",
-  "requirements": ["pymodbus>=3.6.0,<4.0"],
+  "requirements": ["pymodbus>=3.10.0,<4.0"],
   "version": "0.1.0"
 }
 ```
@@ -173,7 +173,7 @@ pytest
 pytest-asyncio
 pytest-cov
 pytest-homeassistant-custom-component
-pymodbus>=3.6.0,<4.0
+pymodbus>=3.10.0,<4.0
 ```
 
 `pyproject.toml`:
@@ -500,6 +500,7 @@ git commit -m "feat: CSV entity-config import"
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pymodbus.client import AsyncModbusTcpClient
 
 from custom_components.siemens_logo.modbus_client import LogoModbusClient
 
@@ -507,7 +508,8 @@ from custom_components.siemens_logo.modbus_client import LogoModbusClient
 @pytest.mark.asyncio
 async def test_connect_delegates_to_pymodbus():
     with patch(
-        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient"
+        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient",
+        autospec=True,
     ) as mock_cls:
         mock_cls.return_value.connect = AsyncMock(return_value=True)
         client = LogoModbusClient("10.0.0.5", 502, 1)
@@ -516,7 +518,8 @@ async def test_connect_delegates_to_pymodbus():
 
 def test_connected_property_delegates_to_pymodbus():
     with patch(
-        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient"
+        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient",
+        autospec=True,
     ) as mock_cls:
         mock_cls.return_value.connected = True
         client = LogoModbusClient("10.0.0.5", 502, 1)
@@ -526,20 +529,22 @@ def test_connected_property_delegates_to_pymodbus():
 @pytest.mark.asyncio
 async def test_read_coils_returns_bit_list():
     with patch(
-        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient"
+        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient",
+        autospec=True,
     ) as mock_cls:
         response = MagicMock(bits=[True, False, True, False], **{"isError.return_value": False})
         mock_cls.return_value.read_coils = AsyncMock(return_value=response)
         client = LogoModbusClient("10.0.0.5", 502, 1)
         bits = await client.read_coils(100, 3)
         assert bits == [True, False, True]
-        mock_cls.return_value.read_coils.assert_awaited_once_with(100, count=3, slave=1)
+        mock_cls.return_value.read_coils.assert_awaited_once_with(100, count=3, device_id=1)
 
 
 @pytest.mark.asyncio
 async def test_read_coils_raises_on_error_response():
     with patch(
-        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient"
+        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient",
+        autospec=True,
     ) as mock_cls:
         response = MagicMock(**{"isError.return_value": True})
         mock_cls.return_value.read_coils = AsyncMock(return_value=response)
@@ -551,14 +556,26 @@ async def test_read_coils_raises_on_error_response():
 @pytest.mark.asyncio
 async def test_write_coil_delegates_to_pymodbus():
     with patch(
-        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient"
+        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient",
+        autospec=True,
     ) as mock_cls:
         response = MagicMock(**{"isError.return_value": False})
         mock_cls.return_value.write_coil = AsyncMock(return_value=response)
         client = LogoModbusClient("10.0.0.5", 502, 1)
         await client.write_coil(100, True)
-        mock_cls.return_value.write_coil.assert_awaited_once_with(100, True, slave=1)
+        mock_cls.return_value.write_coil.assert_awaited_once_with(100, True, device_id=1)
 ```
+
+`autospec=True` on the `patch()` calls is deliberate, not decoration: a bare
+`MagicMock()` accepts any keyword argument silently, so a test asserting
+`slave=1` would keep passing even after pymodbus renamed that kwarg to
+`device_id=1` in 3.10.0 — the mock would never notice the real API changed
+underneath it. `autospec=True` binds the mock to `AsyncModbusTcpClient`'s
+actual signature, so a future pymodbus kwarg rename fails these tests
+immediately instead of only surfacing as a `TypeError` against real
+hardware. (This exact blind spot is why the `slave=`/`device_id=` bug below
+shipped past Task 4's first TDD pass unnoticed — worth internalizing for any
+future wrapper around an external library's call signature.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -593,16 +610,29 @@ class LogoModbusClient:
         self._client.close()
 
     async def read_coils(self, address: int, count: int) -> list[bool]:
-        result = await self._client.read_coils(address, count=count, slave=self._unit_id)
+        result = await self._client.read_coils(address, count=count, device_id=self._unit_id)
         if result.isError():
-            raise ConnectionError(f"Modbus read_coils failed at address {address}: {result}")
+            raise ConnectionError(
+                f"Modbus read_coils failed at address {address} "
+                f"(unit {self._unit_id}): {result}"
+            )
         return list(result.bits[:count])
 
     async def write_coil(self, address: int, value: bool) -> None:
-        result = await self._client.write_coil(address, value, slave=self._unit_id)
+        result = await self._client.write_coil(address, value, device_id=self._unit_id)
         if result.isError():
-            raise ConnectionError(f"Modbus write_coil failed at address {address}: {result}")
+            raise ConnectionError(
+                f"Modbus write_coil failed at address {address} "
+                f"(unit {self._unit_id}): {result}"
+            )
 ```
+
+**`device_id`, not `slave`:** pymodbus renamed the per-call unit-identifier
+kwarg from `slave=` to `device_id=` in 3.10.0, with no compatibility alias.
+The manifest/requirements pin is `pymodbus>=3.10.0,<4.0` (not `>=3.6.0`) so
+that `device_id=` is guaranteed to exist on whatever version HACS/pip
+resolves — using `slave=` against any pymodbus satisfying that pin raises
+`TypeError: unexpected keyword argument 'slave'` on every single call.
 
 - [ ] **Step 4: Run tests to verify they pass**
 

@@ -163,7 +163,11 @@ deprecates/rejects `pytest_plugins` in a non-root conftest.
 
 Mirrors `luxorliving` (same author, proven pattern):
 
-- `hacs.json`, `manifest.json` (`requirements: ["pymodbus>=3.6.0,<4.0"]`,
+- `hacs.json`, `manifest.json` (`requirements: ["pymodbus>=3.10.0,<4.0"]` —
+  narrowed from an earlier `>=3.6.0` floor after implementation found
+  pymodbus renamed its `slave=` kwarg to `device_id=` in 3.10.0 with no
+  compatibility alias; the code uses `device_id=`, so anything below 3.10
+  would `TypeError` on every call,
   `dependencies: ["file_upload"]` — required for the CSV options-flow
   step's `process_uploaded_file`, confirmed by the same pattern in HA
   core's `mqtt`/`zha` manifests), `translations/{en,de}.json`
