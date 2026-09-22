@@ -7,11 +7,18 @@ to a Siemens LOGO! 8 over Modbus TCP, with CSV-import setup comfort and a full
 GitHub CI/CD + stable/pre-release pipeline.
 
 **Architecture:** `custom_components/siemens_logo/` — a `DataUpdateCoordinator`
-batches Modbus coil reads for all configured VM addresses; `binary_sensor`
-and `switch` platforms read from the coordinator; config flow handles
-connection setup, options flow handles CSV import / manual entity add. See
-`docs/superpowers/specs/2026-08-11-siemens-logo-integration-design.md` for
-the full design (read it before starting — this plan implements it).
+chunks Modbus coil reads for all configured VM addresses into batches that
+respect the 2000-coil Modbus protocol limit, and reconnects before polling if
+the TCP session dropped; `binary_sensor` and `switch` platforms share one
+`LogoEntity` base (normalized unique_id, shared `DeviceInfo` so all entities
+group under one device card); config flow handles connection setup (with
+host:port dedup) and options flow handles CSV import / manual entity add.
+See `docs/superpowers/specs/2026-08-11-siemens-logo-integration-design.md`
+for the full design (read it before starting — this plan implements it,
+including the 2026-09-22 revision: chunked batching, reconnect-on-read,
+address normalization, device grouping, `file_upload` manifest dependency,
+root-level `conftest.py` placement, and the Network Input/Output direction
+warning).
 
 **Tech Stack:** Python 3.13, Home Assistant custom component APIs, pymodbus
 3.x (`AsyncModbusTcpClient`), pytest + pytest-homeassistant-custom-component,
@@ -22,14 +29,16 @@ GitHub Actions.
 ## File Structure
 
 ```
+conftest.py                            # root-level: registers HA test plugin
 custom_components/siemens_logo/
   __init__.py         # entry setup/unload, coordinator + client wiring
   const.py             # DOMAIN, CONF_* keys, defaults
-  address.py            # VM address string <-> flat Modbus coil address
+  address.py            # VM address string <-> flat Modbus coil address, normalization
   csv_import.py          # CSV parsing into entity configs
-  modbus_client.py        # thin async pymodbus wrapper
-  coordinator.py           # DataUpdateCoordinator subclass, batched reads
-  config_flow.py            # ConfigFlow (connection) + OptionsFlow (CSV/manual)
+  modbus_client.py        # thin async pymodbus wrapper (connect/read/write/connected)
+  coordinator.py           # DataUpdateCoordinator subclass, chunked reads, reconnect
+  entity.py                 # LogoEntity base: unique_id, DeviceInfo, shared by platforms
+  config_flow.py            # ConfigFlow (connection, unique_id dedup) + OptionsFlow
   binary_sensor.py           # read-only entities
   switch.py                   # read/write entities
   manifest.json
@@ -44,8 +53,10 @@ tests/
   test_coordinator.py
   test_config_flow.py
   test_options_flow.py
+  test_entity.py
   test_binary_sensor.py
   test_switch.py
+  test_init.py
 hacs.json
 README.md
 CHANGELOG.md
@@ -63,7 +74,8 @@ pyproject.toml
 ```
 
 Each module has one job: `address.py` never touches Modbus, `modbus_client.py`
-never touches HA, `coordinator.py` never touches CSV. This keeps every file
+never touches HA, `coordinator.py` never touches CSV, `entity.py` never
+touches Modbus directly (goes through the coordinator). This keeps every file
 independently testable without a running Home Assistant instance except
 where the HA test harness is explicitly needed (config/options flow,
 platforms).
@@ -116,6 +128,7 @@ ENTITY_TYPES = ["binary_sensor", "switch"]
   "name": "Siemens LOGO!",
   "codeowners": ["@phismith91"],
   "config_flow": true,
+  "dependencies": ["file_upload"],
   "documentation": "https://github.com/phismith91/ha-siemens-logo",
   "integration_type": "hub",
   "iot_class": "local_polling",
@@ -124,6 +137,12 @@ ENTITY_TYPES = ["binary_sensor", "switch"]
   "version": "0.1.0"
 }
 ```
+
+`"dependencies": ["file_upload"]` is required because the options flow's CSV
+import step uses `homeassistant.components.file_upload.process_uploaded_file`
+(Task 7) — without declaring the dependency, HA does not guarantee
+`file_upload` is set up before this integration, and the import will fail.
+Same pattern as HA core's `mqtt` and `zha` manifests.
 
 `hacs.json`:
 ```json
@@ -190,7 +209,7 @@ git commit -m "chore: repo skeleton, manifest, dev tooling config"
 
 ---
 
-### Task 2: VM address parser (TDD)
+### Task 2: VM address parser + normalization (TDD)
 
 **Files:**
 - Create: `custom_components/siemens_logo/address.py`
@@ -203,10 +222,10 @@ git commit -m "chore: repo skeleton, manifest, dev tooling config"
 
 `tests/test_address.py`:
 ```python
-"""Tests for VM address parsing."""
+"""Tests for VM address parsing and normalization."""
 import pytest
 
-from custom_components.siemens_logo.address import parse_vm_address
+from custom_components.siemens_logo.address import normalize_vm_address, parse_vm_address
 
 
 def test_parses_valid_byte_bit_address():
@@ -231,6 +250,19 @@ def test_rejects_bit_out_of_range():
 def test_rejects_garbage():
     with pytest.raises(ValueError, match="Invalid VM address"):
         parse_vm_address("not-an-address")
+
+
+def test_normalize_strips_and_uppercases():
+    assert normalize_vm_address(" v10.3 ") == "V10.3"
+
+
+def test_normalize_is_idempotent():
+    assert normalize_vm_address("V10.3") == normalize_vm_address(normalize_vm_address("V10.3"))
+
+
+def test_normalize_rejects_garbage():
+    with pytest.raises(ValueError, match="Invalid VM address"):
+        normalize_vm_address("not-an-address")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -256,31 +288,46 @@ import re
 _VM_BIT_RE = re.compile(r"^V(\d+)\.([0-7])$")
 
 
-def parse_vm_address(address: str) -> int:
-    """Parse a LOGO! VM bit address like 'V923.0' into a flat Modbus coil address.
-
-    Raises ValueError if the address is not in valid byte.bit form.
-    """
+def _match(address: str) -> re.Match[str]:
     match = _VM_BIT_RE.match(address.strip().upper())
     if not match:
         raise ValueError(
             f"Invalid VM address: {address!r} (expected format 'V<byte>.<bit>', "
             "e.g. 'V923.0')"
         )
+    return match
+
+
+def parse_vm_address(address: str) -> int:
+    """Parse a LOGO! VM bit address like 'V923.0' into a flat Modbus coil address.
+
+    Raises ValueError if the address is not in valid byte.bit form.
+    """
+    match = _match(address)
     byte, bit = int(match.group(1)), int(match.group(2))
     return byte * 8 + bit
+
+
+def normalize_vm_address(address: str) -> str:
+    """Return the canonical string form of a VM address (stripped, uppercased).
+
+    Used as the merge/lookup key for CSV re-import and as the unique_id
+    suffix, so 'v1.0' and 'V1.0' resolve to the same entity instead of
+    creating a duplicate. Raises ValueError if the address is invalid.
+    """
+    return _match(address).group(0)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_address.py -v`
-Expected: 5 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add custom_components/siemens_logo/address.py tests/test_address.py tests/__init__.py
-git commit -m "feat: VM address parser"
+git commit -m "feat: VM address parser and normalization"
 ```
 
 ---
@@ -308,6 +355,12 @@ def test_parses_valid_rows():
     assert result.entities[0].address == "V923.0"
     assert result.entities[0].flat_address == 923 * 8
     assert result.entities[0].entity_type == "binary_sensor"
+
+
+def test_normalizes_address_case_and_whitespace():
+    content = "name,address,type\nFront Door, v923.0 ,binary_sensor\n"
+    result = parse_csv(content)
+    assert result.entities[0].address == "V923.0"
 
 
 def test_rejects_missing_header_columns():
@@ -354,7 +407,7 @@ import csv
 import io
 from dataclasses import dataclass, field
 
-from .address import parse_vm_address
+from .address import normalize_vm_address, parse_vm_address
 
 VALID_TYPES = {"binary_sensor", "switch"}
 REQUIRED_COLUMNS = {"name", "address", "type"}
@@ -363,7 +416,7 @@ REQUIRED_COLUMNS = {"name", "address", "type"}
 @dataclass(frozen=True)
 class EntityConfig:
     name: str
-    address: str
+    address: str  # normalized (stripped, uppercased) VM address string
     flat_address: int
     entity_type: str
 
@@ -379,6 +432,8 @@ def parse_csv(content: str) -> CsvImportResult:
 
     Malformed rows are skipped and recorded in `errors`, valid rows are
     still returned -- a single bad row must not block the whole import.
+    Addresses are normalized so re-importing the same VM address in a
+    different case/whitespace form updates the same entity.
     """
     reader = csv.DictReader(io.StringIO(content))
     if reader.fieldnames is None or not REQUIRED_COLUMNS.issubset(set(reader.fieldnames)):
@@ -402,13 +457,16 @@ def parse_csv(content: str) -> CsvImportResult:
             )
             continue
         try:
-            flat_address = parse_vm_address(address)
+            normalized = normalize_vm_address(address)
+            flat_address = parse_vm_address(normalized)
         except ValueError as err:
             result.errors.append(f"Row {line_no}: {err}")
             continue
 
         result.entities.append(
-            EntityConfig(name=name, address=address, flat_address=flat_address, entity_type=entity_type)
+            EntityConfig(
+                name=name, address=normalized, flat_address=flat_address, entity_type=entity_type
+            )
         )
 
     return result
@@ -417,7 +475,7 @@ def parse_csv(content: str) -> CsvImportResult:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_csv_import.py -v`
-Expected: 5 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Commit**
 
@@ -454,6 +512,15 @@ async def test_connect_delegates_to_pymodbus():
         mock_cls.return_value.connect = AsyncMock(return_value=True)
         client = LogoModbusClient("10.0.0.5", 502, 1)
         assert await client.connect() is True
+
+
+def test_connected_property_delegates_to_pymodbus():
+    with patch(
+        "custom_components.siemens_logo.modbus_client.AsyncModbusTcpClient"
+    ) as mock_cls:
+        mock_cls.return_value.connected = True
+        client = LogoModbusClient("10.0.0.5", 502, 1)
+        assert client.connected is True
 
 
 @pytest.mark.asyncio
@@ -515,6 +582,10 @@ class LogoModbusClient:
         self._client = AsyncModbusTcpClient(host, port=port)
         self._unit_id = unit_id
 
+    @property
+    def connected(self) -> bool:
+        return self._client.connected
+
     async def connect(self) -> bool:
         return await self._client.connect()
 
@@ -536,7 +607,7 @@ class LogoModbusClient:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_modbus_client.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
@@ -547,21 +618,30 @@ git commit -m "feat: Modbus TCP client wrapper"
 
 ---
 
-### Task 5: Data update coordinator (TDD)
+### Task 5: Data update coordinator — chunked reads + reconnect (TDD)
 
 **Files:**
+- Create: `conftest.py` (project root)
 - Create: `custom_components/siemens_logo/coordinator.py`
 - Test: `tests/test_coordinator.py`
 - Create: `tests/conftest.py`
 
-- [ ] **Step 1: Write conftest.py (needed by all remaining tests)**
+- [ ] **Step 1: Write the root-level conftest.py**
+
+`conftest.py` (repo root, next to `pyproject.toml` — **not** under `tests/`):
+```python
+"""Root pytest config. Registers the HA test plugin globally.
+
+Must live at the project root: pytest 8 deprecates/rejects
+`pytest_plugins` declared in a non-root conftest.py.
+"""
+pytest_plugins = "pytest_homeassistant_custom_component"
+```
 
 `tests/conftest.py`:
 ```python
 """Shared fixtures for Siemens LOGO! integration tests."""
 import pytest
-
-pytest_plugins = "pytest_homeassistant_custom_component"
 
 
 @pytest.fixture(autouse=True)
@@ -585,6 +665,7 @@ from custom_components.siemens_logo.coordinator import LogoDataCoordinator
 @pytest.mark.asyncio
 async def test_batches_reads_into_a_single_call(hass):
     client = AsyncMock()
+    client.connected = True
     client.read_coils.return_value = [True, False, False, True]
     # addresses 100 and 103 -> single read_coils(100, count=4)
     coordinator = LogoDataCoordinator(hass, client, addresses=[100, 103], scan_interval=5)
@@ -593,6 +674,34 @@ async def test_batches_reads_into_a_single_call(hass):
 
     client.read_coils.assert_awaited_once_with(100, 4)
     assert data == {100: True, 103: True}
+
+
+@pytest.mark.asyncio
+async def test_chunks_reads_when_span_exceeds_cap(hass):
+    client = AsyncMock()
+    client.connected = True
+    client.read_coils.side_effect = [[True], [False]]
+    # addresses 0 and 2000 span 2001 coils, past the 1968 cap -> two reads
+    coordinator = LogoDataCoordinator(hass, client, addresses=[0, 2000], scan_interval=5)
+
+    data = await coordinator._async_update_data()
+
+    assert client.read_coils.await_count == 2
+    client.read_coils.assert_any_await(0, 1)
+    client.read_coils.assert_any_await(2000, 1)
+    assert data == {0: True, 2000: False}
+
+
+@pytest.mark.asyncio
+async def test_reconnects_before_read_if_disconnected(hass):
+    client = AsyncMock()
+    client.connected = False
+    client.read_coils.return_value = [True]
+    coordinator = LogoDataCoordinator(hass, client, addresses=[100], scan_interval=5)
+
+    await coordinator._async_update_data()
+
+    client.connect.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -609,6 +718,7 @@ async def test_empty_address_list_skips_modbus_call(hass):
 @pytest.mark.asyncio
 async def test_read_error_raises_update_failed(hass):
     client = AsyncMock()
+    client.connected = True
     client.read_coils.side_effect = ConnectionError("boom")
     coordinator = LogoDataCoordinator(hass, client, addresses=[100], scan_interval=5)
 
@@ -619,6 +729,7 @@ async def test_read_error_raises_update_failed(hass):
 @pytest.mark.asyncio
 async def test_async_write_coil_writes_and_refreshes(hass):
     client = AsyncMock()
+    client.connected = True
     client.read_coils.return_value = [True]
     coordinator = LogoDataCoordinator(hass, client, addresses=[100], scan_interval=5)
 
@@ -650,9 +761,34 @@ from .modbus_client import LogoModbusClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Modbus read_coils (function code 01) hard-limits a single request to 2000
+# coils. Stay comfortably under that so one oversized group never has to be
+# split again mid-flight.
+MAX_COILS_PER_READ = 1968
+
+
+def _group_addresses(addresses: list[int]) -> list[tuple[int, int]]:
+    """Group sorted addresses into (start, count) ranges.
+
+    Each range spans at most MAX_COILS_PER_READ coils. Addresses close
+    together end up in one read; addresses far apart split into separate
+    reads instead of one huge span covering mostly unused bits.
+    """
+    sorted_addrs = sorted(set(addresses))
+    groups: list[tuple[int, int]] = []
+    group_start = sorted_addrs[0]
+    group_end = sorted_addrs[0]
+    for addr in sorted_addrs[1:]:
+        if addr - group_start + 1 > MAX_COILS_PER_READ:
+            groups.append((group_start, group_end - group_start + 1))
+            group_start = addr
+        group_end = addr
+    groups.append((group_start, group_end - group_start + 1))
+    return groups
+
 
 class LogoDataCoordinator(DataUpdateCoordinator[dict[int, bool]]):
-    """Polls all configured VM coil addresses in a single batched read."""
+    """Polls all configured VM coil addresses, chunked under the Modbus limit."""
 
     def __init__(
         self,
@@ -670,12 +806,18 @@ class LogoDataCoordinator(DataUpdateCoordinator[dict[int, bool]]):
     async def _async_update_data(self) -> dict[int, bool]:
         if not self._addresses:
             return {}
-        low, high = min(self._addresses), max(self._addresses)
+        if not self._client.connected:
+            await self._client.connect()
+        data: dict[int, bool] = {}
         try:
-            bits = await self._client.read_coils(low, high - low + 1)
+            for start, count in _group_addresses(self._addresses):
+                bits = await self._client.read_coils(start, count)
+                for addr in self._addresses:
+                    if start <= addr < start + count:
+                        data[addr] = bits[addr - start]
         except Exception as err:
             raise UpdateFailed(f"Error reading LOGO! Modbus data: {err}") from err
-        return {addr: bits[addr - low] for addr in self._addresses}
+        return data
 
     async def async_write_coil(self, address: int, value: bool) -> None:
         await self._client.write_coil(address, value)
@@ -685,18 +827,18 @@ class LogoDataCoordinator(DataUpdateCoordinator[dict[int, bool]]):
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `pytest tests/test_coordinator.py -v`
-Expected: 4 passed
+Expected: 6 passed
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add custom_components/siemens_logo/coordinator.py tests/test_coordinator.py tests/conftest.py
-git commit -m "feat: batched Modbus data update coordinator"
+git add conftest.py custom_components/siemens_logo/coordinator.py tests/test_coordinator.py tests/conftest.py
+git commit -m "feat: chunked, reconnecting Modbus data update coordinator"
 ```
 
 ---
 
-### Task 6: Config flow — connection step (TDD)
+### Task 6: Config flow — connection step + unique_id dedup (TDD)
 
 **Files:**
 - Create: `custom_components/siemens_logo/config_flow.py`
@@ -757,6 +899,33 @@ async def test_failed_connection_shows_error(hass):
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "cannot_connect"}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_host_port_aborts(hass):
+    with patch(
+        "custom_components.siemens_logo.config_flow.LogoModbusClient"
+    ) as mock_cls:
+        mock_cls.return_value.connect = AsyncMock(return_value=True)
+        mock_cls.return_value.close = lambda: None
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": "10.0.0.5", "port": 502, "unit_id": 1}
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"host": "10.0.0.5", "port": 502, "unit_id": 1}
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -791,6 +960,9 @@ class LogoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
+            await self.async_set_unique_id(f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}")
+            self._abort_if_unique_id_configured()
+
             client = LogoModbusClient(
                 user_input[CONF_HOST], user_input[CONF_PORT], user_input[CONF_UNIT_ID]
             )
@@ -844,6 +1016,9 @@ class LogoOptionsFlow(config_entries.OptionsFlow):
     },
     "error": {
       "cannot_connect": "Cannot connect to the LOGO! at this address."
+    },
+    "abort": {
+      "already_configured": "This LOGO! (host:port) is already configured."
     }
   }
 }
@@ -854,14 +1029,14 @@ class LogoOptionsFlow(config_entries.OptionsFlow):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_config_flow.py -v`
-Expected: 2 passed
+Expected: 3 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 mkdir -p custom_components/siemens_logo/translations
 git add custom_components/siemens_logo/config_flow.py custom_components/siemens_logo/strings.json custom_components/siemens_logo/translations/en.json tests/test_config_flow.py
-git commit -m "feat: config flow connection step"
+git commit -m "feat: config flow connection step with host:port dedup"
 ```
 
 ---
@@ -896,7 +1071,7 @@ async def _create_entry(hass):
         data={"host": "10.0.0.5", "port": 502, "unit_id": 1},
         source="user",
         options={},
-        unique_id=None,
+        unique_id="10.0.0.5:502",
     )
     entry.add_to_hass(hass)
     return entry
@@ -925,16 +1100,18 @@ async def test_csv_import_creates_entities(hass, tmp_path):
     entities = result["data"][CONF_ENTITIES]
     assert len(entities) == 1
     assert entities[0]["name"] == "Front Door"
+    assert entities[0]["address"] == "V923.0"
 
 
 @pytest.mark.asyncio
-async def test_csv_reimport_is_idempotent_on_address(hass, tmp_path):
+async def test_csv_reimport_is_idempotent_on_normalized_address(hass, tmp_path):
     entry = await _create_entry(hass)
     entry.options = {
         CONF_ENTITIES: [{"name": "Old Name", "address": "V923.0", "type": "binary_sensor"}]
     }
     csv_path = tmp_path / "entities.csv"
-    csv_path.write_text("name,address,type\nNew Name,V923.0,binary_sensor\n")
+    # different case/whitespace than the stored address -- must still match
+    csv_path.write_text("name,address,type\nNew Name, v923.0 ,binary_sensor\n")
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(
@@ -951,6 +1128,7 @@ async def test_csv_reimport_is_idempotent_on_address(hass, tmp_path):
     entities = result["data"][CONF_ENTITIES]
     assert len(entities) == 1
     assert entities[0]["name"] == "New Name"
+    assert entities[0]["address"] == "V923.0"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -966,6 +1144,7 @@ from homeassistant.components.file_upload import process_uploaded_file
 from homeassistant.helpers import selector
 from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
 
+from .address import normalize_vm_address
 from .const import CONF_ENTITIES
 from .csv_import import parse_csv
 
@@ -999,7 +1178,10 @@ class LogoOptionsFlow(config_entries.OptionsFlow):
                     translation_placeholders={"errors": "; ".join(result.errors)},
                 )
 
-            existing = {e["address"]: e for e in self._config_entry.options.get(CONF_ENTITIES, [])}
+            existing = {
+                normalize_vm_address(e["address"]): e
+                for e in self._config_entry.options.get(CONF_ENTITIES, [])
+            }
             for cfg in result.entities:
                 existing[cfg.address] = {
                     "name": cfg.name,
@@ -1026,7 +1208,8 @@ Update `custom_components/siemens_logo/strings.json` (add under a top-level
         "data": { "host": "Host", "port": "Port", "unit_id": "Unit ID" }
       }
     },
-    "error": { "cannot_connect": "Cannot connect to the LOGO! at this address." }
+    "error": { "cannot_connect": "Cannot connect to the LOGO! at this address." },
+    "abort": { "already_configured": "This LOGO! (host:port) is already configured." }
   },
   "options": {
     "step": {
@@ -1057,7 +1240,7 @@ Expected: 2 passed
 
 ```bash
 git add custom_components/siemens_logo/config_flow.py custom_components/siemens_logo/strings.json custom_components/siemens_logo/translations/en.json tests/test_options_flow.py
-git commit -m "feat: options flow CSV import step"
+git commit -m "feat: options flow CSV import step with normalized re-import"
 ```
 
 ---
@@ -1089,6 +1272,24 @@ async def test_manual_add_creates_entity(hass):
     assert result["type"] == FlowResultType.CREATE_ENTRY
     entities = result["data"][CONF_ENTITIES]
     assert entities[0]["name"] == "Garage Light"
+    assert entities[0]["address"] == "V924.1"
+
+
+@pytest.mark.asyncio
+async def test_manual_add_normalizes_address(hass):
+    entry = await _create_entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "add_entity"}
+    )
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {"name": "Garage Light", "address": " v924.1 ", "type": "switch"},
+    )
+
+    entities = result["data"][CONF_ENTITIES]
+    assert entities[0]["address"] == "V924.1"
 
 
 @pytest.mark.asyncio
@@ -1115,21 +1316,27 @@ Expected: FAIL — no `async_step_add_entity` handler.
 
 - [ ] **Step 3: Implement the manual-add step**
 
-Add to `LogoOptionsFlow` in `config_flow.py` (and import `parse_vm_address`
-from `.address` at the top of the file):
+Add to `LogoOptionsFlow` in `config_flow.py` (and import `ENTITY_TYPES` from
+`.const`, alongside the existing `normalize_vm_address` import from
+`.address`):
 ```python
     async def async_step_add_entity(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                parse_vm_address(user_input["address"])
+                normalized = normalize_vm_address(user_input["address"])
             except ValueError:
                 errors["address"] = "invalid_address"
             else:
                 existing = {
-                    e["address"]: e for e in self._config_entry.options.get(CONF_ENTITIES, [])
+                    normalize_vm_address(e["address"]): e
+                    for e in self._config_entry.options.get(CONF_ENTITIES, [])
                 }
-                existing[user_input["address"]] = user_input
+                existing[normalized] = {
+                    "name": user_input["name"],
+                    "address": normalized,
+                    "type": user_input["type"],
+                }
                 options = dict(self._config_entry.options)
                 options[CONF_ENTITIES] = list(existing.values())
                 return self.async_create_entry(title="", data=options)
@@ -1144,8 +1351,9 @@ from `.address` at the top of the file):
         return self.async_show_form(step_id="add_entity", data_schema=schema, errors=errors)
 ```
 
-Add `from .const import ENTITY_TYPES` to the imports. Extend
-`strings.json`/`translations/en.json`'s `options.step` with:
+Add `from .const import CONF_ENTITIES, ENTITY_TYPES` (merge with the existing
+`.const` import in that file). Extend `strings.json`/`translations/en.json`'s
+`options.step` with:
 ```json
       "add_entity": {
         "data": { "name": "Name", "address": "VM address (e.g. V923.0)", "type": "Entity type" }
@@ -1159,18 +1367,111 @@ and an `options.error` block:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `pytest tests/test_options_flow.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add custom_components/siemens_logo/config_flow.py custom_components/siemens_logo/strings.json custom_components/siemens_logo/translations/en.json tests/test_options_flow.py
-git commit -m "feat: options flow manual entity add step"
+git commit -m "feat: options flow manual entity add step with address normalization"
 ```
 
 ---
 
-### Task 9: Integration setup/unload wiring (TDD)
+### Task 9: Shared entity base — unique_id + device grouping (TDD)
+
+**Files:**
+- Create: `custom_components/siemens_logo/entity.py`
+- Test: `tests/test_entity.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/test_entity.py`:
+```python
+"""Tests for the shared LOGO! entity base."""
+from unittest.mock import MagicMock
+
+from custom_components.siemens_logo.entity import LogoEntity
+
+
+def test_unique_id_uses_normalized_address():
+    coordinator = MagicMock()
+    entity = LogoEntity(coordinator, "entry1", "LOGO! 10.0.0.5", "Door", " v1.0 ")
+    assert entity.unique_id == "entry1_V1.0"
+
+
+def test_flat_address_parsed_from_normalized_form():
+    coordinator = MagicMock()
+    entity = LogoEntity(coordinator, "entry1", "LOGO! 10.0.0.5", "Door", "V1.0")
+    assert entity._flat_address == 8
+
+
+def test_device_info_groups_entities_under_one_device():
+    coordinator = MagicMock()
+    entity_a = LogoEntity(coordinator, "entry1", "LOGO! 10.0.0.5", "Door", "V1.0")
+    entity_b = LogoEntity(coordinator, "entry1", "LOGO! 10.0.0.5", "Window", "V2.0")
+    assert entity_a.device_info == entity_b.device_info
+    assert entity_a.device_info["name"] == "LOGO! 10.0.0.5"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_entity.py -v`
+Expected: FAIL with `ModuleNotFoundError`
+
+- [ ] **Step 3: Implement the base class**
+
+`custom_components/siemens_logo/entity.py`:
+```python
+"""Shared entity base for Siemens LOGO! platforms.
+
+Every entity is one VM coil address. All entities from the same config
+entry share one DeviceInfo, so they group under a single device card in
+HA instead of listing loose under the integration.
+"""
+from __future__ import annotations
+
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .address import normalize_vm_address, parse_vm_address
+from .const import DOMAIN
+
+
+class LogoEntity(CoordinatorEntity):
+    """Base for all Siemens LOGO! VM-bit entities."""
+
+    def __init__(
+        self, coordinator, entry_id: str, device_name: str, name: str, address: str
+    ) -> None:
+        super().__init__(coordinator)
+        normalized = normalize_vm_address(address)
+        self._flat_address = parse_vm_address(normalized)
+        self._attr_name = name
+        self._attr_unique_id = f"{entry_id}_{normalized}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry_id)},
+            name=device_name,
+            manufacturer="Siemens",
+            model="LOGO! 8",
+        )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_entity.py -v`
+Expected: 3 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add custom_components/siemens_logo/entity.py tests/test_entity.py
+git commit -m "feat: shared entity base with normalized unique_id and device grouping"
+```
+
+---
+
+### Task 10: Integration setup/unload wiring (TDD)
 
 **Files:**
 - Modify: `custom_components/siemens_logo/__init__.py`
@@ -1199,7 +1500,7 @@ async def test_setup_entry_connects_and_forwards_platforms(hass):
         data={"host": "10.0.0.5", "port": 502, "unit_id": 1},
         source="user",
         options={CONF_ENTITIES: [{"name": "Door", "address": "V1.0", "type": "binary_sensor"}]},
-        unique_id=None,
+        unique_id="10.0.0.5:502",
     )
     entry.add_to_hass(hass)
 
@@ -1207,6 +1508,7 @@ async def test_setup_entry_connects_and_forwards_platforms(hass):
         "custom_components.siemens_logo.LogoModbusClient"
     ) as mock_cls:
         mock_cls.return_value.connect = AsyncMock(return_value=True)
+        mock_cls.return_value.connected = True
         mock_cls.return_value.close = lambda: None
         mock_cls.return_value.read_coils = AsyncMock(return_value=[True])
 
@@ -1264,6 +1566,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "coordinator": coordinator,
         "client": client,
+        "device_name": f"LOGO! {entry.title}",
     }
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
@@ -1297,7 +1600,7 @@ git commit -m "feat: integration setup/unload wiring"
 
 ---
 
-### Task 10: binary_sensor platform (TDD)
+### Task 11: binary_sensor platform (TDD)
 
 **Files:**
 - Create: `custom_components/siemens_logo/binary_sensor.py`
@@ -1316,8 +1619,8 @@ from custom_components.siemens_logo.binary_sensor import LogoBinarySensor
 def test_is_on_reads_from_coordinator_data():
     coordinator = MagicMock()
     coordinator.data = {8: True, 16: False}
-    sensor_on = LogoBinarySensor(coordinator, "entry1", "Door", "V1.0")
-    sensor_off = LogoBinarySensor(coordinator, "entry1", "Window", "V2.0")
+    sensor_on = LogoBinarySensor(coordinator, "entry1", "LOGO! 10.0.0.5", "Door", "V1.0")
+    sensor_off = LogoBinarySensor(coordinator, "entry1", "LOGO! 10.0.0.5", "Window", "V2.0")
 
     assert sensor_on.is_on is True
     assert sensor_off.is_on is False
@@ -1340,31 +1643,26 @@ from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .address import parse_vm_address
 from .const import CONF_ENTITIES, DOMAIN
+from .entity import LogoEntity
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    stored = hass.data[DOMAIN][entry.entry_id]
+    coordinator = stored["coordinator"]
+    device_name = stored["device_name"]
     async_add_entities(
-        LogoBinarySensor(coordinator, entry.entry_id, cfg["name"], cfg["address"])
+        LogoBinarySensor(coordinator, entry.entry_id, device_name, cfg["name"], cfg["address"])
         for cfg in entry.options.get(CONF_ENTITIES, [])
         if cfg["type"] == "binary_sensor"
     )
 
 
-class LogoBinarySensor(CoordinatorEntity, BinarySensorEntity):
+class LogoBinarySensor(LogoEntity, BinarySensorEntity):
     """A read-only LOGO! VM bit."""
-
-    def __init__(self, coordinator, entry_id: str, name: str, address: str) -> None:
-        super().__init__(coordinator)
-        self._flat_address = parse_vm_address(address)
-        self._attr_name = name
-        self._attr_unique_id = f"{entry_id}_{address}"
 
     @property
     def is_on(self) -> bool | None:
@@ -1385,7 +1683,7 @@ git commit -m "feat: binary_sensor platform"
 
 ---
 
-### Task 11: switch platform (TDD)
+### Task 12: switch platform (TDD)
 
 **Files:**
 - Create: `custom_components/siemens_logo/switch.py`
@@ -1406,7 +1704,7 @@ from custom_components.siemens_logo.switch import LogoSwitch
 def test_is_on_reads_from_coordinator_data():
     coordinator = MagicMock()
     coordinator.data = {8: True}
-    switch = LogoSwitch(coordinator, "entry1", "Garage Light", "V1.0")
+    switch = LogoSwitch(coordinator, "entry1", "LOGO! 10.0.0.5", "Garage Light", "V1.0")
     assert switch.is_on is True
 
 
@@ -1414,7 +1712,7 @@ def test_is_on_reads_from_coordinator_data():
 async def test_turn_on_writes_coil_true():
     coordinator = MagicMock()
     coordinator.async_write_coil = AsyncMock()
-    switch = LogoSwitch(coordinator, "entry1", "Garage Light", "V1.0")
+    switch = LogoSwitch(coordinator, "entry1", "LOGO! 10.0.0.5", "Garage Light", "V1.0")
 
     await switch.async_turn_on()
 
@@ -1425,7 +1723,7 @@ async def test_turn_on_writes_coil_true():
 async def test_turn_off_writes_coil_false():
     coordinator = MagicMock()
     coordinator.async_write_coil = AsyncMock()
-    switch = LogoSwitch(coordinator, "entry1", "Garage Light", "V1.0")
+    switch = LogoSwitch(coordinator, "entry1", "LOGO! 10.0.0.5", "Garage Light", "V1.0")
 
     await switch.async_turn_off()
 
@@ -1450,31 +1748,26 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .address import parse_vm_address
 from .const import CONF_ENTITIES, DOMAIN
+from .entity import LogoEntity
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    stored = hass.data[DOMAIN][entry.entry_id]
+    coordinator = stored["coordinator"]
+    device_name = stored["device_name"]
     async_add_entities(
-        LogoSwitch(coordinator, entry.entry_id, cfg["name"], cfg["address"])
+        LogoSwitch(coordinator, entry.entry_id, device_name, cfg["name"], cfg["address"])
         for cfg in entry.options.get(CONF_ENTITIES, [])
         if cfg["type"] == "switch"
     )
 
 
-class LogoSwitch(CoordinatorEntity, SwitchEntity):
+class LogoSwitch(LogoEntity, SwitchEntity):
     """A read/write LOGO! VM bit."""
-
-    def __init__(self, coordinator, entry_id: str, name: str, address: str) -> None:
-        super().__init__(coordinator)
-        self._flat_address = parse_vm_address(address)
-        self._attr_name = name
-        self._attr_unique_id = f"{entry_id}_{address}"
 
     @property
     def is_on(self) -> bool | None:
@@ -1501,19 +1794,20 @@ git commit -m "feat: switch platform"
 
 ---
 
-### Task 12: Full test suite + coverage check
+### Task 13: Full test suite + coverage check
 
 **Files:** none created — verification task.
 
 - [ ] **Step 1: Run the entire suite**
 
 Run: `pytest --cov=custom_components/siemens_logo --cov-report=term-missing -v`
-Expected: all tests pass (Tasks 2–11 combined: ~28 tests).
+Expected: all tests pass (Tasks 2–12 combined: ~40 tests).
 
 - [ ] **Step 2: Fix any integration-level failures**
 
 If tests fail here that passed individually, it's almost always an
-`options={}` vs `options=None` mismatch or an `entry.add_to_hass` ordering
+`options={}` vs `options=None` mismatch, a missing `unique_id` on a
+hand-built `ConfigEntry` in a test, or an `entry.add_to_hass` ordering
 issue — check that every test builds its `ConfigEntry` the same way as
 `_create_entry` in `tests/test_options_flow.py`. Fix inline, re-run.
 
@@ -1528,7 +1822,7 @@ git commit -m "fix: cross-test integration fixes"
 
 ---
 
-### Task 13: pre-commit configuration
+### Task 14: pre-commit configuration
 
 **Files:**
 - Create: `.pre-commit-config.yaml`
@@ -1591,7 +1885,7 @@ git commit -m "chore: pre-commit configuration"
 
 ---
 
-### Task 14: CI workflows — pre-commit and tests
+### Task 15: CI workflows — pre-commit and tests
 
 **Files:**
 - Create: `.github/workflows/pre-commit.yml`
@@ -1649,7 +1943,7 @@ git commit -m "ci: pre-commit and test workflows"
 
 ---
 
-### Task 15: CI workflows — HACS and hassfest validation
+### Task 16: CI workflows — HACS and hassfest validation
 
 **Files:**
 - Create: `.github/workflows/validate-hacs.yml`
@@ -1706,7 +2000,7 @@ git commit -m "ci: HACS and hassfest validation workflows"
 
 ---
 
-### Task 16: Release pipeline (stable + pre-release)
+### Task 17: Release pipeline (stable + pre-release)
 
 **Files:**
 - Create: `.github/workflows/release.yml`
@@ -1766,7 +2060,7 @@ git commit -m "ci: release pipeline for stable and pre-release tags"
 
 ---
 
-### Task 17: README, CHANGELOG, and merge
+### Task 18: README, CHANGELOG, and merge
 
 **Files:**
 - Create: `README.md`
@@ -1792,10 +2086,12 @@ for why).
 ## Setup
 
 1. Settings -> Devices & Services -> Add Integration -> "Siemens LOGO!"
-2. Enter host, port (default 502), unit ID (default 1)
+2. Enter host, port (default 502), unit ID (default 1). Adding the same
+   host:port twice is rejected -- the entry already exists.
 3. Open the integration's Options and either:
    - **Import CSV file**: drop a CSV with columns `name,address,type`
    - **Add entity manually**: one form per entity
+4. All entities appear grouped under one device card for this LOGO!.
 
 ## CSV format
 
@@ -1809,8 +2105,31 @@ for why).
 address in LOGO!Soft Comfort on the properties of the Network Input/Output
 block you wired to that signal in your own program.
 
-Re-importing a CSV updates entities by matching `address` -- it won't
-duplicate existing ones.
+Re-importing a CSV updates entities by matching `address` (case- and
+whitespace-normalized) -- it won't duplicate existing ones.
+
+### `switch` vs `binary_sensor` -- pick the right one
+
+A **Network Input** block is written by Home Assistant to feed a signal
+*into* your LOGO! program -- set its VM address to `switch`. A **Network
+Output** block is written by the LOGO! program itself so Home Assistant
+can read it -- set its VM address to `binary_sensor`.
+
+Modbus itself carries no direction information, so this integration
+**cannot detect a mismatch**. If you configure a Network Output address as
+`switch`, Home Assistant's write will be silently overwritten by the
+LOGO!'s own next program cycle -- the entity will appear to "snap back" to
+its previous state. If that happens, double-check the block type in
+LOGO!Soft Comfort and fix the `type` column.
+
+## Operational notes
+
+- LOGO! 8 supports up to 8 concurrent Modbus TCP connections. This
+  integration holds one. If you also have LOGO!Soft Comfort's live
+  monitor open against the same device, both can normally coexist, but
+  keep the total client count in mind.
+- The poll interval is fixed at 5 seconds in this version; it is not yet
+  configurable from the UI.
 
 ## Full design
 
@@ -1826,8 +2145,10 @@ See [docs/superpowers/specs/2026-08-11-siemens-logo-integration-design.md](docs/
 
 ## [0.1.0] - TBD
 ### Added
-- Initial release: Modbus TCP connection, CSV/manual entity setup,
-  binary_sensor and switch platforms for LOGO! 8 VM addresses.
+- Initial release: Modbus TCP connection with host:port dedup, chunked
+  and reconnecting coordinator polling, CSV/manual entity setup with
+  normalized addressing, binary_sensor and switch platforms grouped
+  under one device per LOGO! 8.
 ```
 
 - [ ] **Step 3: Commit**
@@ -1842,7 +2163,7 @@ git commit -m "docs: README and CHANGELOG"
 ```bash
 GIT_SSH_COMMAND='ssh -F /dev/null' git push -u origin feature/integration-skeleton
 gh pr create --title "Siemens LOGO! 8 integration: v0.1.0 core" \
-  --body "Implements the design in docs/superpowers/specs/2026-08-11-siemens-logo-integration-design.md: Modbus TCP coordinator, CSV/manual entity setup, binary_sensor + switch platforms, full CI/CD (pre-commit, tests, HACS/hassfest validation, release pipeline)."
+  --body "Implements the design in docs/superpowers/specs/2026-08-11-siemens-logo-integration-design.md: chunked/reconnecting Modbus TCP coordinator, host:port dedup, CSV/manual entity setup with normalized addressing, device-grouped binary_sensor + switch platforms, full CI/CD (pre-commit, tests, HACS/hassfest validation, release pipeline)."
 ```
 
 - [ ] **Step 5: Verify CI is green, then merge**
@@ -1855,7 +2176,7 @@ gh pr merge --squash --delete-branch
 
 ---
 
-### Task 18: Branch protection and first pre-release
+### Task 19: Branch protection and first pre-release
 
 **Files:** none — repo administration + tag.
 
@@ -1896,6 +2217,8 @@ Expected: release exists, marked "Pre-release", `siemens_logo.zip` attached.
   feasibility spike before any design/plan work starts.
 - Analog I/O (AI/AQ/AM), counters, RTC/schedule functions.
 - Older LOGO! generations (0BA7 and earlier), LOGO! web-service protocol.
+- Options-flow UI to change the poll interval (v2).
+- Options-flow step to remove a single entity (v2).
 - Submission to the official `home-assistant/brands` repo (for a proper
   HACS icon) and to the default HACS integration list — both are follow-up
   PRs once v0.1.0 has real-world validation, not part of this plan.
