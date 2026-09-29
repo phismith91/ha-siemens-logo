@@ -1,0 +1,7 @@
+"$schema" = "https://ubcode.useblocks.com/ubproject.schema.json"
+
+[project]
+name = "ha-siemens-logo"
+
+[source]
+dir = "docs"
