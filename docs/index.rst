@@ -5,3 +5,4 @@ ha-siemens-logo documentation
    :maxdepth: 2
 
    requirements/index
+   specs/index
