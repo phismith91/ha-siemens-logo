@@ -32,3 +32,14 @@
    Do instead: every feature/fix gets its own branch + PR, mirrors luxorliving workflow.
 3. **[2026-08-11] Mirror luxorliving repo conventions**
    Do instead: pre-commit (black/isort/flake8/bandit/prettier), pytest + pytest-homeassistant-custom-component, validate-hacs + validate-hassfest CI jobs, release.yml on tag push (vX.Y.Z stable, vX.Y.Z-rc.N prerelease), CHANGELOG.md.
+4. **[2026-09-29] Sphinx-Needs docs replace docs/superpowers/**
+   Do instead: specs go to `docs/specs/YYYY-MM-DD-<topic>-design.rst`
+   (`spec::` objects linking `req::` IDs), plans go to
+   `docs/plans/YYYY-MM-DD-<topic>.rst` (plain RST, condensed for large
+   plans — see the note at the top of
+   `docs/plans/2026-08-11-siemens-logo-integration.rst` for the pattern).
+   Requirements live in `docs/requirements/index.rst` as `req::` objects.
+   Tests get `test::` objects in `docs/tests/index.rst` linking to the
+   `spec::`/`req::` IDs they verify. ubCode (VS Code extension) config:
+   `ubproject.toml` at repo root, `[source] dir = "docs"`. Build check:
+   `sphinx-build -b html docs docs/_build/html -W`.
