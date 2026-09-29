@@ -6,3 +6,4 @@ ha-siemens-logo documentation
 
    requirements/index
    specs/index
+   plans/index
